@@ -2,6 +2,7 @@ from fastapi import FastAPI, APIRouter, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
+from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
 from pathlib import Path
@@ -12,14 +13,13 @@ from datetime import datetime, timezone, timedelta
 import bcrypt
 import jwt
 from emergentintegrations.llm.chat import LlmChat, UserMessage
-from sqlalchemy import select, and_
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from database import get_db, engine, Base
-from models import User as UserModel, Transaction as TransactionModel, Inventory as InventoryModel
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
+
+mongo_url = os.environ['MONGO_URL']
+client = AsyncIOMotorClient(mongo_url)
+db = client[os.environ['DB_NAME']]
 
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
@@ -30,9 +30,9 @@ JWT_ALGORITHM = 'HS256'
 
 class User(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    id: str
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     username: str
-    created_at: datetime
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 class UserRegister(BaseModel):
     username: str
@@ -47,8 +47,8 @@ class TokenResponse(BaseModel):
     username: str
 
 class Transaction(BaseModel):
-    model_config = ConfigDict(extra="ignore", from_attributes=True)
-    id: str
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     user_id: str
     type: Literal["sale", "expense", "payment"]
     date: str
@@ -60,16 +60,15 @@ class Transaction(BaseModel):
     mode: Optional[str] = None
     customer: Optional[str] = None
     profit_loss: Optional[float] = None
-    created_at: datetime
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 class Inventory(BaseModel):
-    model_config = ConfigDict(extra="ignore", from_attributes=True)
-    id: str
+    model_config = ConfigDict(extra="ignore")
     user_id: str
     product: str
     quantity: int
     purchase_price: float
-    updated_at: datetime
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 class InventoryAdd(BaseModel):
     product: str
@@ -93,7 +92,7 @@ def create_token(user_id: str, username: str) -> str:
     payload = {
         'user_id': user_id,
         'username': username,
-        'exp': datetime.now() + timedelta(days=30)
+        'exp': datetime.now(timezone.utc) + timedelta(days=30)
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
@@ -107,24 +106,18 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
         raise HTTPException(status_code=401, detail="Invalid token")
 
 @api_router.post("/auth/register", response_model=TokenResponse, status_code=201)
-async def register(user_input: UserRegister, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(UserModel).where(UserModel.username == user_input.username))
-    existing = result.scalar_one_or_none()
-    
+async def register(user_input: UserRegister):
+    existing = await db.users.find_one({"username": user_input.username}, {"_id": 0})
     if existing:
         raise HTTPException(status_code=400, detail="Username already exists")
     
     password_hash = bcrypt.hashpw(user_input.password.encode('utf-8'), bcrypt.gensalt())
-    user = UserModel(
-        id=str(uuid.uuid4()),
-        username=user_input.username,
-        password_hash=password_hash.decode('utf-8'),
-        created_at=datetime.now()
-    )
+    user = User(username=user_input.username)
+    user_doc = user.model_dump()
+    user_doc['password_hash'] = password_hash.decode('utf-8')
+    user_doc['created_at'] = user_doc['created_at'].isoformat()
     
-    db.add(user)
-    await db.commit()
-    await db.refresh(user)
+    await db.users.insert_one(user_doc)
     
     initial_stock = [
         {"product": "rice", "quantity": 50, "purchase_price": 40},
@@ -136,36 +129,31 @@ async def register(user_input: UserRegister, db: AsyncSession = Depends(get_db))
     ]
     
     for item in initial_stock:
-        inventory = InventoryModel(
-            id=str(uuid.uuid4()),
-            user_id=user.id,
-            product=item["product"],
-            quantity=item["quantity"],
-            purchase_price=item["purchase_price"],
-            updated_at=datetime.now()
-        )
-        db.add(inventory)
-    
-    await db.commit()
+        await db.inventory.insert_one({
+            "user_id": user.id,
+            "product": item["product"],
+            "quantity": item["quantity"],
+            "purchase_price": item["purchase_price"],
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        })
     
     token = create_token(user.id, user.username)
     return TokenResponse(token=token, username=user.username)
 
 @api_router.post("/auth/login", response_model=TokenResponse)
-async def login(user_input: UserLogin, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(UserModel).where(UserModel.username == user_input.username))
-    user = result.scalar_one_or_none()
-    
-    if not user:
+async def login(user_input: UserLogin):
+    user_doc = await db.users.find_one({"username": user_input.username}, {"_id": 0})
+    if not user_doc:
         raise HTTPException(status_code=401, detail="Invalid credentials")
     
-    if not bcrypt.checkpw(user_input.password.encode('utf-8'), user.password_hash.encode('utf-8')):
+    if not bcrypt.checkpw(user_input.password.encode('utf-8'), user_doc['password_hash'].encode('utf-8')):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     
-    token = create_token(user.id, user.username)
-    return TokenResponse(token=token, username=user.username)
+    token = create_token(user_doc['id'], user_doc['username'])
+    return TokenResponse(token=token, username=user_doc['username'])
 
 async def parse_command(command: str) -> dict:
+    """Use OpenAI to parse natural language command into structured data"""
     api_key = os.environ.get('EMERGENT_LLM_KEY')
     
     system_message = """You are a financial transaction parser for Indian shopkeepers.
@@ -202,7 +190,7 @@ Return ONLY valid JSON, no explanation."""
         return {"type": "unknown", "error": "Could not parse command"}
 
 @api_router.post("/command", response_model=CommandResponse)
-async def process_command(input: CommandInput, auth: dict = Depends(verify_token), db: AsyncSession = Depends(get_db)):
+async def process_command(input: CommandInput, auth: dict = Depends(verify_token)):
     user_id = auth['user_id']
     command = input.command.strip()
     
@@ -222,45 +210,38 @@ async def process_command(input: CommandInput, auth: dict = Depends(verify_token
         
         profit_loss = 0
         if product:
-            result = await db.execute(
-                select(InventoryModel).where(
-                    and_(InventoryModel.user_id == user_id, InventoryModel.product == product)
-                )
-            )
-            inventory_item = result.scalar_one_or_none()
-            
-            if inventory_item:
-                purchase_price = inventory_item.purchase_price
+            inventory_doc = await db.inventory.find_one({"user_id": user_id, "product": product}, {"_id": 0})
+            if inventory_doc:
+                purchase_price = inventory_doc.get('purchase_price', 0)
                 profit_loss = (selling_price - purchase_price) * quantity
                 
-                inventory_item.quantity = max(0, inventory_item.quantity - quantity)
-                inventory_item.updated_at = datetime.now()
-            else:
-                inventory = InventoryModel(
-                    id=str(uuid.uuid4()),
-                    user_id=user_id,
-                    product=product,
-                    quantity=0,
-                    purchase_price=0,
-                    updated_at=datetime.now()
+                new_quantity = max(0, inventory_doc['quantity'] - quantity)
+                await db.inventory.update_one(
+                    {"user_id": user_id, "product": product},
+                    {"$set": {"quantity": new_quantity, "updated_at": datetime.now(timezone.utc).isoformat()}}
                 )
-                db.add(inventory)
+            else:
+                await db.inventory.insert_one({
+                    "user_id": user_id,
+                    "product": product,
+                    "quantity": 0,
+                    "purchase_price": 0,
+                    "updated_at": datetime.now(timezone.utc).isoformat()
+                })
         
-        transaction = TransactionModel(
-            id=str(uuid.uuid4()),
+        transaction = Transaction(
             user_id=user_id,
             type="sale",
-            date=datetime.now().strftime('%Y-%m-%d'),
+            date=datetime.now(timezone.utc).strftime('%Y-%m-%d'),
             product=product,
             quantity=quantity,
             price_per_unit=selling_price,
             total=parsed.get('total'),
-            profit_loss=profit_loss,
-            created_at=datetime.now()
+            profit_loss=profit_loss
         )
-        db.add(transaction)
-        await db.commit()
-        await db.refresh(transaction)
+        trans_doc = transaction.model_dump()
+        trans_doc['created_at'] = trans_doc['created_at'].isoformat()
+        await db.transactions.insert_one(trans_doc)
         
         profit_msg = ""
         if profit_loss > 0:
@@ -270,113 +251,108 @@ async def process_command(input: CommandInput, auth: dict = Depends(verify_token
         
         return CommandResponse(
             message=f"Sale recorded. Total ₹{transaction.total:.0f}.{profit_msg}",
-            transaction=Transaction.model_validate(transaction)
+            transaction=transaction
         )
     
     elif parsed.get('type') == 'expense':
-        transaction = TransactionModel(
-            id=str(uuid.uuid4()),
+        transaction = Transaction(
             user_id=user_id,
             type="expense",
-            date=datetime.now().strftime('%Y-%m-%d'),
+            date=datetime.now(timezone.utc).strftime('%Y-%m-%d'),
             category=parsed.get('category', 'General'),
-            total=parsed.get('total'),
-            created_at=datetime.now()
+            total=parsed.get('total')
         )
-        db.add(transaction)
-        await db.commit()
-        await db.refresh(transaction)
+        trans_doc = transaction.model_dump()
+        trans_doc['created_at'] = trans_doc['created_at'].isoformat()
+        await db.transactions.insert_one(trans_doc)
         
         return CommandResponse(
             message=f"Expense recorded. ₹{transaction.total:.0f}.",
-            transaction=Transaction.model_validate(transaction)
+            transaction=transaction
         )
     
     elif parsed.get('type') == 'payment':
-        transaction = TransactionModel(
-            id=str(uuid.uuid4()),
+        transaction = Transaction(
             user_id=user_id,
             type="payment",
-            date=datetime.now().strftime('%Y-%m-%d'),
+            date=datetime.now(timezone.utc).strftime('%Y-%m-%d'),
             mode=parsed.get('mode', 'cash'),
             customer=parsed.get('customer'),
-            total=parsed.get('total'),
-            created_at=datetime.now()
+            total=parsed.get('total')
         )
-        db.add(transaction)
-        await db.commit()
-        await db.refresh(transaction)
+        trans_doc = transaction.model_dump()
+        trans_doc['created_at'] = trans_doc['created_at'].isoformat()
+        await db.transactions.insert_one(trans_doc)
         
         return CommandResponse(
             message=f"Payment received. ₹{transaction.total:.0f} recorded.",
-            transaction=Transaction.model_validate(transaction)
+            transaction=transaction
         )
     
     else:
         return CommandResponse(message="Sorry, I didn't understand that. Please try again.")
 
 @api_router.get("/summary", response_model=SummaryResponse)
-async def get_summary(auth: dict = Depends(verify_token), db: AsyncSession = Depends(get_db)):
+async def get_summary(auth: dict = Depends(verify_token)):
     user_id = auth['user_id']
-    today = datetime.now().strftime('%Y-%m-%d')
+    today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
     
-    result = await db.execute(
-        select(TransactionModel).where(
-            and_(TransactionModel.user_id == user_id, TransactionModel.date == today)
-        )
-    )
-    transactions = result.scalars().all()
+    transactions = await db.transactions.find(
+        {"user_id": user_id, "date": today},
+        {"_id": 0}
+    ).to_list(1000)
     
-    sales = sum(t.total for t in transactions if t.type == 'sale')
-    expenses = sum(t.total for t in transactions if t.type == 'expense')
+    sales = sum(t['total'] for t in transactions if t['type'] == 'sale')
+    expenses = sum(t['total'] for t in transactions if t['type'] == 'expense')
     profit = sales - expenses
     
     return SummaryResponse(sales=sales, expenses=expenses, profit=profit, date=today)
 
 @api_router.get("/inventory", response_model=List[Inventory])
-async def get_inventory(auth: dict = Depends(verify_token), db: AsyncSession = Depends(get_db)):
+async def get_inventory(auth: dict = Depends(verify_token)):
     user_id = auth['user_id']
+    inventory_items = await db.inventory.find({"user_id": user_id}, {"_id": 0}).to_list(1000)
     
-    result = await db.execute(
-        select(InventoryModel).where(InventoryModel.user_id == user_id)
-    )
-    inventory_items = result.scalars().all()
+    for item in inventory_items:
+        if isinstance(item.get('updated_at'), str):
+            item['updated_at'] = datetime.fromisoformat(item['updated_at'])
+        if 'purchase_price' not in item:
+            item['purchase_price'] = 0
     
-    return [Inventory.model_validate(item) for item in inventory_items]
+    return inventory_items
 
 @api_router.post("/inventory/add")
-async def add_inventory(inventory_input: InventoryAdd, auth: dict = Depends(verify_token), db: AsyncSession = Depends(get_db)):
+async def add_inventory(inventory_input: InventoryAdd, auth: dict = Depends(verify_token)):
     user_id = auth['user_id']
     product = inventory_input.product.lower()
     
-    result = await db.execute(
-        select(InventoryModel).where(
-            and_(InventoryModel.user_id == user_id, InventoryModel.product == product)
-        )
-    )
-    existing = result.scalar_one_or_none()
+    existing = await db.inventory.find_one({"user_id": user_id, "product": product}, {"_id": 0})
     
     if existing:
-        existing.quantity += inventory_input.quantity
-        existing.purchase_price = inventory_input.purchase_price
-        existing.updated_at = datetime.now()
-        await db.commit()
-        return {"message": f"Updated {product}. New stock: {existing.quantity} units", "quantity": existing.quantity}
-    else:
-        inventory = InventoryModel(
-            id=str(uuid.uuid4()),
-            user_id=user_id,
-            product=product,
-            quantity=inventory_input.quantity,
-            purchase_price=inventory_input.purchase_price,
-            updated_at=datetime.now()
+        new_quantity = existing['quantity'] + inventory_input.quantity
+        await db.inventory.update_one(
+            {"user_id": user_id, "product": product},
+            {"$set": {
+                "quantity": new_quantity,
+                "purchase_price": inventory_input.purchase_price,
+                "updated_at": datetime.now(timezone.utc).isoformat()
+            }}
         )
-        db.add(inventory)
-        await db.commit()
+        return {"message": f"Updated {product}. New stock: {new_quantity} units", "quantity": new_quantity}
+    else:
+        inventory_doc = {
+            "user_id": user_id,
+            "product": product,
+            "quantity": inventory_input.quantity,
+            "purchase_price": inventory_input.purchase_price,
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }
+        await db.inventory.insert_one(inventory_doc)
         return {"message": f"Added {product} to inventory", "quantity": inventory_input.quantity}
 
 @api_router.post("/inventory/seed")
-async def seed_inventory(auth: dict = Depends(verify_token), db: AsyncSession = Depends(get_db)):
+async def seed_inventory(auth: dict = Depends(verify_token)):
+    """Seed initial grocery inventory for new users"""
     user_id = auth['user_id']
     
     initial_stock = [
@@ -391,40 +367,31 @@ async def seed_inventory(auth: dict = Depends(verify_token), db: AsyncSession = 
     ]
     
     for item in initial_stock:
-        result = await db.execute(
-            select(InventoryModel).where(
-                and_(InventoryModel.user_id == user_id, InventoryModel.product == item["product"])
-            )
-        )
-        existing = result.scalar_one_or_none()
-        
+        existing = await db.inventory.find_one({"user_id": user_id, "product": item["product"]})
         if not existing:
-            inventory = InventoryModel(
-                id=str(uuid.uuid4()),
-                user_id=user_id,
-                product=item["product"],
-                quantity=item["quantity"],
-                purchase_price=item["purchase_price"],
-                updated_at=datetime.now()
-            )
-            db.add(inventory)
+            await db.inventory.insert_one({
+                "user_id": user_id,
+                "product": item["product"],
+                "quantity": item["quantity"],
+                "purchase_price": item["purchase_price"],
+                "updated_at": datetime.now(timezone.utc).isoformat()
+            })
     
-    await db.commit()
     return {"message": "Inventory seeded with basic groceries", "items_added": len(initial_stock)}
 
 @api_router.get("/transactions", response_model=List[Transaction])
-async def get_transactions(auth: dict = Depends(verify_token), db: AsyncSession = Depends(get_db)):
+async def get_transactions(auth: dict = Depends(verify_token)):
     user_id = auth['user_id']
+    transactions = await db.transactions.find(
+        {"user_id": user_id},
+        {"_id": 0}
+    ).sort("created_at", -1).limit(50).to_list(50)
     
-    result = await db.execute(
-        select(TransactionModel)
-        .where(TransactionModel.user_id == user_id)
-        .order_by(TransactionModel.created_at.desc())
-        .limit(50)
-    )
-    transactions = result.scalars().all()
+    for t in transactions:
+        if isinstance(t.get('created_at'), str):
+            t['created_at'] = datetime.fromisoformat(t['created_at'])
     
-    return [Transaction.model_validate(t) for t in transactions]
+    return transactions
 
 app.include_router(api_router)
 
@@ -441,3 +408,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+@app.on_event("shutdown")
+async def shutdown_db_client():
+    client.close()
