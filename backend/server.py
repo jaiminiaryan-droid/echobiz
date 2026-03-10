@@ -216,29 +216,64 @@ Return ONLY valid JSON with no extra text or explanation."""
                     {"role": "system", "content": system_message},
                     {"role": "user", "content": command}
                 ],
-                model="sarvam-105b",  # Using Sarvam's 105B model for better understanding
+                model="sarvam-30b",  # Using Sarvam's 30B model (without reasoning mode)
                 temperature=0,
-                max_tokens=200
+                max_tokens=300
             )
-            return response.choices[0].message.content
+            # Log the full response for debugging
+            logger.info(f"Sarvam AI raw response: {response}")
+            
+            # Try different ways to access the content
+            if hasattr(response, 'choices') and len(response.choices) > 0:
+                choice = response.choices[0]
+                if hasattr(choice, 'message'):
+                    # First try content
+                    if hasattr(choice.message, 'content') and choice.message.content:
+                        return choice.message.content
+                    # Then try reasoning_content (for reasoning models)
+                    elif hasattr(choice.message, 'reasoning_content') and choice.message.reasoning_content:
+                        # Extract JSON from reasoning content if possible
+                        reasoning = choice.message.reasoning_content
+                        # Try to find JSON in the reasoning
+                        import re
+                        json_match = re.search(r'\{[^{}]*"type"[^{}]*\}', reasoning)
+                        if json_match:
+                            return json_match.group(0)
+                        return reasoning
+                    elif hasattr(choice.message, 'text') and choice.message.text:
+                        return choice.message.text
+                elif hasattr(choice, 'text') and choice.text:
+                    return choice.text
+            
+            # If we can't get content, return the response as dict
+            if hasattr(response, 'model_dump'):
+                return str(response.model_dump())
+            return str(response)
         
         response_text = await loop.run_in_executor(None, get_sarvam_response)
+        logger.info(f"Sarvam AI response text: {response_text}")
         
         import json
         # Clean response text - remove markdown code blocks if present
-        response_text = response_text.strip()
-        if response_text.startswith("```json"):
-            response_text = response_text[7:]
-        if response_text.startswith("```"):
-            response_text = response_text[3:]
-        if response_text.endswith("```"):
-            response_text = response_text[:-3]
-        response_text = response_text.strip()
-        
-        parsed_data = json.loads(response_text)
-        return parsed_data
+        if response_text:
+            response_text = response_text.strip()
+            if response_text.startswith("```json"):
+                response_text = response_text[7:]
+            if response_text.startswith("```"):
+                response_text = response_text[3:]
+            if response_text.endswith("```"):
+                response_text = response_text[:-3]
+            response_text = response_text.strip()
+            
+            parsed_data = json.loads(response_text)
+            return parsed_data
+        else:
+            logger.error("Sarvam AI returned empty response")
+            return {"type": "unknown", "error": "Empty response from AI"}
     except Exception as e:
         logger.error(f"Sarvam AI parse error: {str(e)}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
         return {"type": "unknown", "error": "Could not parse command"}
 
 @api_router.post("/voice")
