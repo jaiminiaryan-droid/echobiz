@@ -1,0 +1,152 @@
+{
+  "brand_identity": {
+    "name": "EchoBiz",
+    "persona": "The Digital Munim",
+    "core_philosophy": "Fusion of Traditional Bahi-Khata Trust with Swiss Minimalist Clarity",
+    "emotional_tone": "Warm, Respectful, Trustworthy, Simple",
+    "target_audience": "Small shopkeepers, kirana store owners, nano businesses in India",
+    "design_archetype": "Organic & Earthy (Trust, Stability)"
+  },
+  "typography": {
+    "primary_font": "Manrope",
+    "secondary_font": "Manrope",
+    "font_import_url": "https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700;800&display=swap",
+    "usage_rules": {
+      "headings": {
+        "weight": "800",
+        "tracking": "tight",
+        "size_mobile": "text-3xl",
+        "size_desktop": "text-5xl"
+      },
+      "body": {
+        "weight": "500",
+        "leading": "relaxed",
+        "size_mobile": "text-base",
+        "size_desktop": "text-lg"
+      },
+      "numbers": {
+        "weight": "700",
+        "feature_settings": "'tnum' on, 'lnum' on"
+      }
+    }
+  },
+  "colors": {
+    "palette": {
+      "background": {
+        "default": "#FAFAF9",
+        "paper": "#FFFFFF",
+        "subtle": "#F5F5F4"
+      },
+      "foreground": {
+        "primary": "#1C1917",
+        "secondary": "#57534E",
+        "muted": "#A8A29E"
+      },
+      "brand": {
+        "primary": "#EA580C",
+        "primary_foreground": "#FFFFFF",
+        "secondary": "#0F766E",
+        "accent": "#FDBA74"
+      },
+      "semantic": {
+        "success": "#047857",
+        "success_bg": "#ECFDF5",
+        "danger": "#BE123C",
+        "danger_bg": "#FFF1F2",
+        "warning": "#B45309",
+        "warning_bg": "#FFFBEB"
+      }
+    },
+    "gradients": {
+      "primary_action": "linear-gradient(135deg, #EA580C 0%, #C2410C 100%)",
+      "subtle_glow": "radial-gradient(circle at center, rgba(234, 88, 12, 0.15) 0%, transparent 70%)"
+    }
+  },
+  "layout_strategy": {
+    "container_width": "max-w-md mx-auto md:max-w-4xl",
+    "spacing": {
+      "section_gap": "gap-8",
+      "card_padding": "p-6 md:p-8",
+      "touch_target_min": "h-12 w-12"
+    },
+    "grid_system": {
+      "dashboard": "grid grid-cols-2 gap-4",
+      "list": "flex flex-col gap-3"
+    },
+    "border_radius": {
+      "card": "rounded-2xl",
+      "button": "rounded-full",
+      "input": "rounded-xl"
+    }
+  },
+  "components": {
+    "buttons": {
+      "primary_mic": {
+        "styles": "fixed bottom-8 left-1/2 -translate-x-1/2 h-20 w-20 rounded-full bg-orange-600 shadow-xl flex items-center justify-center text-white z-50 hover:scale-105 active:scale-95 transition-all duration-300",
+        "animation": "animate-pulse-slow"
+      },
+      "action_card": {
+        "styles": "flex flex-col items-center justify-center p-6 bg-white border border-stone-100 shadow-sm rounded-2xl active:bg-stone-50 transition-colors gap-3 h-32"
+      }
+    },
+    "cards": {
+      "transaction_item": {
+        "styles": "flex justify-between items-center p-4 bg-white rounded-xl border border-stone-100 shadow-sm"
+      },
+      "summary_widget": {
+        "styles": "bg-stone-900 text-white p-6 rounded-2xl shadow-lg relative overflow-hidden"
+      }
+    },
+    "inputs": {
+      "voice_text_display": {
+        "styles": "w-full min-h-[120px] text-2xl font-medium text-stone-800 bg-transparent border-none focus:ring-0 placeholder:text-stone-300 resize-none text-center"
+      }
+    }
+  },
+  "visual_assets": {
+    "images": [
+      {
+        "category": "hero_shopkeeper",
+        "url": "https://images.unsplash.com/photo-1723900132510-800d7c5fc9b0?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzNzl8MHwxfHNlYXJjaHwzfHxmcmllbmRseSUyMGluZGlhbiUyMHNob3BrZWVwZXIlMjBwb3J0cmFpdHxlbnwwfHx8fDE3NzMxMjEzMTR8MA&ixlib=rb-4.1.0&q=85",
+        "description": "Friendly elderly shopkeeper/Munim-ji for trust on login page"
+      },
+      {
+        "category": "currency_coins",
+        "url": "https://images.unsplash.com/photo-1706811977312-02324812ed2e?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA2ODl8MHwxfHNlYXJjaHwxfHxpbmRpYW4lMjBjdXJyZW5jeSUyMHJ1cGVlJTIwY29pbnN8ZW58MHx8fHwxNzczMTIxMzE2fDA&ixlib=rb-4.1.0&q=85",
+        "description": "Pile of Indian coins for financial prosperity visuals"
+      },
+      {
+        "category": "inventory_veg",
+        "url": "https://images.pexels.com/photos/16747097/pexels-photo-16747097.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+        "description": "Fresh market produce for inventory background"
+      }
+    ],
+    "icons": {
+      "library": "lucide-react",
+      "preferred_set": ["Mic", "IndianRupee", "Store", "Package", "History", "TrendingUp", "TrendingDown", "User"]
+    }
+  },
+  "motion": {
+    "interactions": {
+      "tap_feedback": "active:scale-95 transition-transform duration-100",
+      "page_transition": "initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }}",
+      "voice_listening": "animate-pulse infinite duration-1500"
+    }
+  },
+  "accessibility": {
+    "contrast_check": "Ensure all text is APCA compliant. Use dark grey (stone-900) on off-white (stone-50).",
+    "touch_targets": "Minimum 48x48px for all interactive elements.",
+    "text_size": "Scale up text by 10% compared to standard SaaS apps."
+  },
+  "universal_guidelines": [
+    "Use 'Manrope' font for everything. Import it in index.css.",
+    "Do not use gradients for text.",
+    "Use generous padding (p-6, p-8) inside cards.",
+    "Shadows should be soft and warm: shadow-[0_4px_20px_-4px_rgba(28,25,23,0.1)].",
+    "Always use the 'data-testid' attribute for interactive elements.",
+    "Use 'sonner' for toast notifications.",
+    "Components must use named exports.",
+    "Pages must use default exports.",
+    "Never use purely transparent backgrounds for overlays; use blur or semi-opaque fills."
+  ]
+}
