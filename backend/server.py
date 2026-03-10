@@ -14,6 +14,7 @@ import jwt
 from sarvamai import SarvamAI
 from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
+from emergentintegrations.llm.chat import LlmChat, UserMessage
 
 from database import get_db, engine, Base
 from models import User as UserModel, Transaction as TransactionModel, Inventory as InventoryModel
@@ -21,8 +22,11 @@ from models import User as UserModel, Transaction as TransactionModel, Inventory
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# Initialize Sarvam AI client - 100% Indian AI solution!
+# Initialize Sarvam AI client for speech-to-text (100% Indian AI solution!)
 sarvam_client = SarvamAI(api_subscription_key=os.environ.get('SARVAM_API_KEY'))
+
+# Get Emergent LLM Key for OpenAI command parsing
+EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY')
 
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
@@ -147,13 +151,13 @@ async def login(user_input: UserLogin, db: AsyncSession = Depends(get_db)):
     return TokenResponse(token=token, username=user.username)
 
 async def parse_command(command: str) -> dict:
-    """Parse natural language command using Sarvam AI LLM (Made in India!)"""
+    """Parse natural language command using OpenAI via Emergent LLM Key"""
     
     system_message = """You are a financial transaction parser for Indian shopkeepers.
 Extract structured data from natural language commands in HINDI or ENGLISH.
 
 IMPORTANT: Detect buying vs selling carefully:
-- BUYING/PURCHASE: kharido, kharide, kharida, liye, liya, bought, purchase, mangaya
+- BUYING/PURCHASE: kharido, kharide, kharida, liye, liya, bought, purchase, mangaya, got
 - SELLING: beche, bechi, becha, bechaa, sold, sale, diye (when giving to customer)
 
 HINDI SALE (बेचना - Selling) Examples:
@@ -187,6 +191,9 @@ ENGLISH PURCHASE Examples:
 Input: "Bought 10 rice at 40 each"
 Output: {"type": "purchase", "product": "rice", "quantity": 10, "price_per_unit": 40, "total": 400}
 
+Input: "Got 10 rice at 50 each"
+Output: {"type": "purchase", "product": "rice", "quantity": 10, "price_per_unit": 50, "total": 500}
+
 HINDI EXPENSE Examples:
 Input: "500 rupaye ka kharcha" or "Dukaan ke liye 2000 kharch kiye"
 Output: {"type": "expense", "category": "shop", "total": 2000}
@@ -206,72 +213,34 @@ Common Products Translation:
 Return ONLY valid JSON with no extra text or explanation."""
     
     try:
-        # Use Sarvam AI's chat completion
-        import asyncio
-        loop = asyncio.get_event_loop()
+        # Use OpenAI via emergentintegrations
+        chat = LlmChat(
+            api_key=EMERGENT_LLM_KEY,
+            session_id=f"parse_{uuid.uuid4()}",
+            system_message=system_message
+        ).with_model("openai", "gpt-4o")
         
-        def get_sarvam_response():
-            response = sarvam_client.chat.completions(
-                messages=[
-                    {"role": "system", "content": system_message},
-                    {"role": "user", "content": command}
-                ],
-                model="sarvam-30b",  # Using Sarvam's 30B model (without reasoning mode)
-                temperature=0,
-                max_tokens=300
-            )
-            # Log the full response for debugging
-            logger.info(f"Sarvam AI raw response: {response}")
-            
-            # Try different ways to access the content
-            if hasattr(response, 'choices') and len(response.choices) > 0:
-                choice = response.choices[0]
-                if hasattr(choice, 'message'):
-                    # First try content
-                    if hasattr(choice.message, 'content') and choice.message.content:
-                        return choice.message.content
-                    # Then try reasoning_content (for reasoning models)
-                    elif hasattr(choice.message, 'reasoning_content') and choice.message.reasoning_content:
-                        # Extract JSON from reasoning content if possible
-                        reasoning = choice.message.reasoning_content
-                        # Try to find JSON in the reasoning
-                        import re
-                        json_match = re.search(r'\{[^{}]*"type"[^{}]*\}', reasoning)
-                        if json_match:
-                            return json_match.group(0)
-                        return reasoning
-                    elif hasattr(choice.message, 'text') and choice.message.text:
-                        return choice.message.text
-                elif hasattr(choice, 'text') and choice.text:
-                    return choice.text
-            
-            # If we can't get content, return the response as dict
-            if hasattr(response, 'model_dump'):
-                return str(response.model_dump())
-            return str(response)
+        user_message = UserMessage(text=command)
+        response_text = await chat.send_message(user_message)
         
-        response_text = await loop.run_in_executor(None, get_sarvam_response)
-        logger.info(f"Sarvam AI response text: {response_text}")
+        logger.info(f"OpenAI response: {response_text}")
         
         import json
         # Clean response text - remove markdown code blocks if present
-        if response_text:
-            response_text = response_text.strip()
-            if response_text.startswith("```json"):
-                response_text = response_text[7:]
-            if response_text.startswith("```"):
-                response_text = response_text[3:]
-            if response_text.endswith("```"):
-                response_text = response_text[:-3]
-            response_text = response_text.strip()
-            
-            parsed_data = json.loads(response_text)
-            return parsed_data
-        else:
-            logger.error("Sarvam AI returned empty response")
-            return {"type": "unknown", "error": "Empty response from AI"}
+        response_text = response_text.strip()
+        if response_text.startswith("```json"):
+            response_text = response_text[7:]
+        if response_text.startswith("```"):
+            response_text = response_text[3:]
+        if response_text.endswith("```"):
+            response_text = response_text[:-3]
+        response_text = response_text.strip()
+        
+        parsed_data = json.loads(response_text)
+        logger.info(f"Parsed command successfully: {parsed_data}")
+        return parsed_data
     except Exception as e:
-        logger.error(f"Sarvam AI parse error: {str(e)}")
+        logger.error(f"Command parse error: {str(e)}")
         import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
         return {"type": "unknown", "error": "Could not parse command"}
