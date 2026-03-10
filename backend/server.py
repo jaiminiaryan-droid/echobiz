@@ -11,8 +11,7 @@ import uuid
 from datetime import datetime, timezone, timedelta
 import bcrypt
 import jwt
-from emergentintegrations.llm.chat import LlmChat, UserMessage
-from emergentintegrations.llm.openai import OpenAISpeechToText
+from openai import AsyncOpenAI
 from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,6 +20,9 @@ from models import User as UserModel, Transaction as TransactionModel, Inventory
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
+
+# Initialize OpenAI client with your API key
+openai_client = AsyncOpenAI(api_key=os.environ.get('OPENAI_API_KEY'))
 
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
@@ -145,7 +147,7 @@ async def login(user_input: UserLogin, db: AsyncSession = Depends(get_db)):
     return TokenResponse(token=token, username=user.username)
 
 async def parse_command(command: str) -> dict:
-    api_key = os.environ.get('EMERGENT_LLM_KEY')
+    """Parse natural language command using GPT-4o"""
     
     system_message = """You are a financial transaction parser for Indian shopkeepers.
 Extract structured data from natural language commands in HINDI or ENGLISH.
@@ -178,20 +180,22 @@ Keywords:
 
 Return ONLY valid JSON, no explanation."""
     
-    chat = LlmChat(
-        api_key=api_key,
-        session_id=f"parser-{uuid.uuid4()}",
-        system_message=system_message
-    ).with_model("openai", "gpt-4o")
-    
-    user_message = UserMessage(text=command)
-    response = await chat.send_message(user_message)
-    
-    import json
     try:
-        parsed_data = json.loads(response)
+        response = await openai_client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": command}
+            ],
+            temperature=0,
+            max_tokens=200
+        )
+        
+        import json
+        parsed_data = json.loads(response.choices[0].message.content)
         return parsed_data
-    except:
+    except Exception as e:
+        logger.error(f"Parse command error: {str(e)}")
         return {"type": "unknown", "error": "Could not parse command"}
 
 @api_router.post("/voice")
@@ -212,19 +216,16 @@ async def process_voice(
             content = await audio.read()
             f.write(content)
         
-        # Transcribe with Whisper
-        api_key = os.environ.get('EMERGENT_LLM_KEY')
-        stt = OpenAISpeechToText(api_key=api_key)
-        
+        # Transcribe with Whisper using your OpenAI account
         with open(audio_path, "rb") as audio_file:
-            response = await stt.transcribe(
-                file=audio_file,
+            transcription = await openai_client.audio.transcriptions.create(
                 model="whisper-1",
+                file=audio_file,
                 language="hi",  # Hindi (auto-detects English too)
                 response_format="json"
             )
         
-        transcribed_text = response.text
+        transcribed_text = transcription.text
         
         # Clean up temp file
         audio_path.unlink(missing_ok=True)
@@ -232,7 +233,7 @@ async def process_voice(
         # Parse the transcribed command
         parsed = await parse_command(transcribed_text)
         
-        # Process as regular command (reuse existing logic)
+        # Process as regular command
         user_id = auth['user_id']
         
         if parsed.get('type') == 'sale':
