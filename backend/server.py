@@ -126,28 +126,6 @@ async def register(user_input: UserRegister, db: AsyncSession = Depends(get_db))
     await db.commit()
     await db.refresh(user)
     
-    initial_stock = [
-        {"product": "rice", "quantity": 50, "purchase_price": 40},
-        {"product": "wheat flour", "quantity": 30, "purchase_price": 35},
-        {"product": "sugar", "quantity": 25, "purchase_price": 45},
-        {"product": "cooking oil", "quantity": 20, "purchase_price": 180},
-        {"product": "tea", "quantity": 15, "purchase_price": 250},
-        {"product": "salt", "quantity": 40, "purchase_price": 20},
-    ]
-    
-    for item in initial_stock:
-        inventory = InventoryModel(
-            id=str(uuid.uuid4()),
-            user_id=user.id,
-            product=item["product"],
-            quantity=item["quantity"],
-            purchase_price=item["purchase_price"],
-            updated_at=datetime.now()
-        )
-        db.add(inventory)
-    
-    await db.commit()
-    
     token = create_token(user.id, user.username)
     return TokenResponse(token=token, username=user.username)
 
