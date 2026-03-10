@@ -1,4 +1,5 @@
-from fastapi import FastAPI, APIRouter
+from fastapi import FastAPI, APIRouter, HTTPException, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -6,67 +7,292 @@ import os
 import logging
 from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict
-from typing import List
+from typing import List, Optional, Literal
 import uuid
-from datetime import datetime, timezone
-
+from datetime import datetime, timezone, timedelta
+import bcrypt
+import jwt
+from emergentintegrations.llm.chat import LlmChat, UserMessage
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# MongoDB connection
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
-# Create the main app without a prefix
 app = FastAPI()
-
-# Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
+security = HTTPBearer()
 
+JWT_SECRET = os.environ.get('JWT_SECRET', 'echobiz-secret-key-change-in-production')
+JWT_ALGORITHM = 'HS256'
 
-# Define Models
-class StatusCheck(BaseModel):
-    model_config = ConfigDict(extra="ignore")  # Ignore MongoDB's _id field
-    
+class User(BaseModel):
+    model_config = ConfigDict(extra="ignore")
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    client_name: str
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    username: str
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-class StatusCheckCreate(BaseModel):
-    client_name: str
+class UserRegister(BaseModel):
+    username: str
+    password: str
 
-# Add your routes to the router instead of directly to app
-@api_router.get("/")
-async def root():
-    return {"message": "Hello World"}
+class UserLogin(BaseModel):
+    username: str
+    password: str
 
-@api_router.post("/status", response_model=StatusCheck)
-async def create_status_check(input: StatusCheckCreate):
-    status_dict = input.model_dump()
-    status_obj = StatusCheck(**status_dict)
+class TokenResponse(BaseModel):
+    token: str
+    username: str
+
+class Transaction(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    user_id: str
+    type: Literal["sale", "expense", "payment"]
+    date: str
+    product: Optional[str] = None
+    quantity: Optional[int] = None
+    price_per_unit: Optional[float] = None
+    total: float
+    category: Optional[str] = None
+    mode: Optional[str] = None
+    customer: Optional[str] = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+class Inventory(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    user_id: str
+    product: str
+    quantity: int
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+class CommandInput(BaseModel):
+    command: str
+
+class CommandResponse(BaseModel):
+    message: str
+    transaction: Optional[Transaction] = None
+
+class SummaryResponse(BaseModel):
+    sales: float
+    expenses: float
+    profit: float
+    date: str
+
+def create_token(user_id: str, username: str) -> str:
+    payload = {
+        'user_id': user_id,
+        'username': username,
+        'exp': datetime.now(timezone.utc) + timedelta(days=30)
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        return payload
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+@api_router.post("/auth/register", response_model=TokenResponse)
+async def register(user_input: UserRegister):
+    existing = await db.users.find_one({"username": user_input.username}, {"_id": 0})
+    if existing:
+        raise HTTPException(status_code=400, detail="Username already exists")
     
-    # Convert to dict and serialize datetime to ISO string for MongoDB
-    doc = status_obj.model_dump()
-    doc['timestamp'] = doc['timestamp'].isoformat()
+    password_hash = bcrypt.hashpw(user_input.password.encode('utf-8'), bcrypt.gensalt())
+    user = User(username=user_input.username)
+    user_doc = user.model_dump()
+    user_doc['password_hash'] = password_hash.decode('utf-8')
+    user_doc['created_at'] = user_doc['created_at'].isoformat()
     
-    _ = await db.status_checks.insert_one(doc)
-    return status_obj
+    await db.users.insert_one(user_doc)
+    token = create_token(user.id, user.username)
+    return TokenResponse(token=token, username=user.username)
 
-@api_router.get("/status", response_model=List[StatusCheck])
-async def get_status_checks():
-    # Exclude MongoDB's _id field from the query results
-    status_checks = await db.status_checks.find({}, {"_id": 0}).to_list(1000)
+@api_router.post("/auth/login", response_model=TokenResponse)
+async def login(user_input: UserLogin):
+    user_doc = await db.users.find_one({"username": user_input.username}, {"_id": 0})
+    if not user_doc:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
     
-    # Convert ISO string timestamps back to datetime objects
-    for check in status_checks:
-        if isinstance(check['timestamp'], str):
-            check['timestamp'] = datetime.fromisoformat(check['timestamp'])
+    if not bcrypt.checkpw(user_input.password.encode('utf-8'), user_doc['password_hash'].encode('utf-8')):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
     
-    return status_checks
+    token = create_token(user_doc['id'], user_doc['username'])
+    return TokenResponse(token=token, username=user_doc['username'])
 
-# Include the router in the main app
+async def parse_command(command: str) -> dict:
+    """Use OpenAI to parse natural language command into structured data"""
+    api_key = os.environ.get('EMERGENT_LLM_KEY')
+    
+    system_message = """You are a financial transaction parser for Indian shopkeepers.
+Extract structured data from natural language commands.
+
+For SALE commands (sold, becha, sale):
+{"type": "sale", "product": "<product_name>", "quantity": <number>, "price_per_unit": <price>, "total": <quantity * price>}
+
+For EXPENSE commands (bought, purchase, spent, kharcha):
+{"type": "expense", "category": "<category>", "total": <amount>}
+
+For PAYMENT commands (payment, paid, received, mila):
+{"type": "payment", "mode": "<cash/upi/card>", "customer": "<name if mentioned>", "total": <amount>}
+
+For QUERY commands (summary, profit, kitna, status):
+{"type": "query", "query_type": "<summary/inventory>"}
+
+Return ONLY valid JSON, no explanation."""
+    
+    chat = LlmChat(
+        api_key=api_key,
+        session_id=f"parser-{uuid.uuid4()}",
+        system_message=system_message
+    ).with_model("openai", "gpt-4o")
+    
+    user_message = UserMessage(text=command)
+    response = await chat.send_message(user_message)
+    
+    import json
+    try:
+        parsed_data = json.loads(response)
+        return parsed_data
+    except:
+        return {"type": "unknown", "error": "Could not parse command"}
+
+@api_router.post("/command", response_model=CommandResponse)
+async def process_command(input: CommandInput, auth: dict = Depends(verify_token)):
+    user_id = auth['user_id']
+    command = input.command.strip()
+    
+    parsed = await parse_command(command)
+    
+    if parsed.get('type') == 'query':
+        query_type = parsed.get('query_type', 'summary')
+        if query_type == 'summary':
+            return CommandResponse(message="Please check summary section")
+        elif query_type == 'inventory':
+            return CommandResponse(message="Please check inventory section")
+    
+    if parsed.get('type') == 'sale':
+        transaction = Transaction(
+            user_id=user_id,
+            type="sale",
+            date=datetime.now(timezone.utc).strftime('%Y-%m-%d'),
+            product=parsed.get('product'),
+            quantity=parsed.get('quantity'),
+            price_per_unit=parsed.get('price_per_unit'),
+            total=parsed.get('total')
+        )
+        trans_doc = transaction.model_dump()
+        trans_doc['created_at'] = trans_doc['created_at'].isoformat()
+        await db.transactions.insert_one(trans_doc)
+        
+        product = parsed.get('product')
+        quantity = parsed.get('quantity', 0)
+        if product:
+            inventory_doc = await db.inventory.find_one({"user_id": user_id, "product": product}, {"_id": 0})
+            if inventory_doc:
+                new_quantity = max(0, inventory_doc['quantity'] - quantity)
+                await db.inventory.update_one(
+                    {"user_id": user_id, "product": product},
+                    {"$set": {"quantity": new_quantity, "updated_at": datetime.now(timezone.utc).isoformat()}}
+                )
+            else:
+                await db.inventory.insert_one({
+                    "user_id": user_id,
+                    "product": product,
+                    "quantity": 0,
+                    "updated_at": datetime.now(timezone.utc).isoformat()
+                })
+        
+        return CommandResponse(
+            message=f"Sale recorded. Total ₹{transaction.total:.0f}.",
+            transaction=transaction
+        )
+    
+    elif parsed.get('type') == 'expense':
+        transaction = Transaction(
+            user_id=user_id,
+            type="expense",
+            date=datetime.now(timezone.utc).strftime('%Y-%m-%d'),
+            category=parsed.get('category', 'General'),
+            total=parsed.get('total')
+        )
+        trans_doc = transaction.model_dump()
+        trans_doc['created_at'] = trans_doc['created_at'].isoformat()
+        await db.transactions.insert_one(trans_doc)
+        
+        return CommandResponse(
+            message=f"Expense recorded. ₹{transaction.total:.0f}.",
+            transaction=transaction
+        )
+    
+    elif parsed.get('type') == 'payment':
+        transaction = Transaction(
+            user_id=user_id,
+            type="payment",
+            date=datetime.now(timezone.utc).strftime('%Y-%m-%d'),
+            mode=parsed.get('mode', 'cash'),
+            customer=parsed.get('customer'),
+            total=parsed.get('total')
+        )
+        trans_doc = transaction.model_dump()
+        trans_doc['created_at'] = trans_doc['created_at'].isoformat()
+        await db.transactions.insert_one(trans_doc)
+        
+        return CommandResponse(
+            message=f"Payment received. ₹{transaction.total:.0f} recorded.",
+            transaction=transaction
+        )
+    
+    else:
+        return CommandResponse(message="Sorry, I didn't understand that. Please try again.")
+
+@api_router.get("/summary", response_model=SummaryResponse)
+async def get_summary(auth: dict = Depends(verify_token)):
+    user_id = auth['user_id']
+    today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    
+    transactions = await db.transactions.find(
+        {"user_id": user_id, "date": today},
+        {"_id": 0}
+    ).to_list(1000)
+    
+    sales = sum(t['total'] for t in transactions if t['type'] == 'sale')
+    expenses = sum(t['total'] for t in transactions if t['type'] == 'expense')
+    profit = sales - expenses
+    
+    return SummaryResponse(sales=sales, expenses=expenses, profit=profit, date=today)
+
+@api_router.get("/inventory", response_model=List[Inventory])
+async def get_inventory(auth: dict = Depends(verify_token)):
+    user_id = auth['user_id']
+    inventory_items = await db.inventory.find({"user_id": user_id}, {"_id": 0}).to_list(1000)
+    
+    for item in inventory_items:
+        if isinstance(item.get('updated_at'), str):
+            item['updated_at'] = datetime.fromisoformat(item['updated_at'])
+    
+    return inventory_items
+
+@api_router.get("/transactions", response_model=List[Transaction])
+async def get_transactions(auth: dict = Depends(verify_token)):
+    user_id = auth['user_id']
+    transactions = await db.transactions.find(
+        {"user_id": user_id},
+        {"_id": 0}
+    ).sort("created_at", -1).limit(50).to_list(50)
+    
+    for t in transactions:
+        if isinstance(t.get('created_at'), str):
+            t['created_at'] = datetime.fromisoformat(t['created_at'])
+    
+    return transactions
+
 app.include_router(api_router)
 
 app.add_middleware(
@@ -77,7 +303,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
