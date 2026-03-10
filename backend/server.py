@@ -12,6 +12,7 @@ from datetime import datetime, timezone, timedelta
 import bcrypt
 import jwt
 from openai import AsyncOpenAI
+from sarvamai import SarvamAI
 from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,8 +22,11 @@ from models import User as UserModel, Transaction as TransactionModel, Inventory
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# Initialize OpenAI client with your API key
+# Initialize OpenAI client for GPT-4o parsing
 openai_client = AsyncOpenAI(api_key=os.environ.get('OPENAI_API_KEY'))
+
+# Initialize Sarvam AI client for Indian language speech-to-text
+sarvam_client = SarvamAI(api_subscription_key=os.environ.get('SARVAM_API_KEY'))
 
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
@@ -204,7 +208,7 @@ async def process_voice(
     auth: dict = Depends(verify_token),
     db: AsyncSession = Depends(get_db)
 ):
-    """Convert voice to text using OpenAI Whisper and process command"""
+    """Convert voice to text using Sarvam AI (optimized for Indian languages) and process command"""
     
     try:
         # Save uploaded audio temporarily
@@ -216,21 +220,27 @@ async def process_voice(
             content = await audio.read()
             f.write(content)
         
-        # Transcribe with Whisper using your OpenAI account
-        with open(audio_path, "rb") as audio_file:
-            transcription = await openai_client.audio.transcriptions.create(
-                model="whisper-1",
-                file=audio_file,
-                language="hi",  # Hindi (auto-detects English too)
-                response_format="json"
-            )
+        # Transcribe with Sarvam AI (supports 22 Indian languages + code-mixing)
+        # Note: Sarvam SDK is synchronous, so we run it in executor
+        import asyncio
+        loop = asyncio.get_event_loop()
         
-        transcribed_text = transcription.text
+        def transcribe_audio():
+            with open(audio_path, "rb") as audio_file:
+                response = sarvam_client.speech_to_text.transcribe(
+                    file=audio_file,
+                    model="saaras:v3",
+                    mode="transcribe"
+                )
+                return response.transcript
+        
+        transcribed_text = await loop.run_in_executor(None, transcribe_audio)
+        logger.info(f"Sarvam AI transcribed: {transcribed_text}")
         
         # Clean up temp file
         audio_path.unlink(missing_ok=True)
         
-        # Parse the transcribed command
+        # Parse the transcribed command with GPT
         parsed = await parse_command(transcribed_text)
         
         # Process as regular command
