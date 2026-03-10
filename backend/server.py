@@ -152,33 +152,58 @@ async def parse_command(command: str) -> dict:
     system_message = """You are a financial transaction parser for Indian shopkeepers.
 Extract structured data from natural language commands in HINDI or ENGLISH.
 
-HINDI SALE Examples:
-Input: "10 chawal 60 rupaye mein beche" or "Maine 5 sugar 50 rupaye mein bechi"
-Output: {"type": "sale", "product": "rice", "quantity": 10, "price_per_unit": 60, "total": 600}
+IMPORTANT: Detect buying vs selling carefully:
+- BUYING/PURCHASE: kharido, kharide, kharida, liye, liya, bought, purchase, mangaya
+- SELLING: beche, bechi, becha, bechaa, sold, sale, diye (when giving to customer)
+
+HINDI SALE (बेचना - Selling) Examples:
+Input: "10 chawal 60 rupaye mein beche"
+Output: {"type": "sale", "product": "chawal", "quantity": 10, "price_per_unit": 60, "total": 600}
+
+Input: "Maine 5 sugar 50 rupaye mein bechi"
+Output: {"type": "sale", "product": "sugar", "quantity": 5, "price_per_unit": 50, "total": 250}
+
+Input: "5 kilo chawal 60 ke rate pe bech diye"
+Output: {"type": "sale", "product": "chawal", "quantity": 5, "price_per_unit": 60, "total": 300}
+
+HINDI PURCHASE (खरीदना - Buying/Inventory) Examples:
+Input: "10 kilo chawal 50 ke rate pe kharida"
+Output: {"type": "purchase", "product": "chawal", "quantity": 10, "price_per_unit": 50, "total": 500}
+
+Input: "ye chiz 100 ki kharido"
+Output: {"type": "purchase", "product": "item", "quantity": 1, "price_per_unit": 100, "total": 100}
+
+Input: "5 sugar 40 rupaye mein liye"
+Output: {"type": "purchase", "product": "sugar", "quantity": 5, "price_per_unit": 40, "total": 200}
+
+Input: "maine 10 kg chawal 50 ke rate pe kharide"
+Output: {"type": "purchase", "product": "chawal", "quantity": 10, "price_per_unit": 50, "total": 500}
 
 ENGLISH SALE Examples:
 Input: "Sold 5 rice for 50 each"
 Output: {"type": "sale", "product": "rice", "quantity": 5, "price_per_unit": 50, "total": 250}
+
+ENGLISH PURCHASE Examples:
+Input: "Bought 10 rice at 40 each"
+Output: {"type": "purchase", "product": "rice", "quantity": 10, "price_per_unit": 40, "total": 400}
 
 HINDI EXPENSE Examples:
 Input: "500 rupaye ka kharcha" or "Dukaan ke liye 2000 kharch kiye"
 Output: {"type": "expense", "category": "shop", "total": 2000}
 
 ENGLISH EXPENSE Examples:
-Input: "Bought raw material for 3000"
-Output: {"type": "expense", "category": "raw material", "total": 3000}
+Input: "Bought shop supplies for 3000"
+Output: {"type": "expense", "category": "shop supplies", "total": 3000}
 
-MIXED (Hinglish):
-Input: "5 rice 60 rupaye each mein becha"
-Output: {"type": "sale", "product": "rice", "quantity": 5, "price_per_unit": 60, "total": 300}
+Common Products Translation:
+- chawal = rice
+- cheeni = sugar
+- atta = wheat flour
+- tel = oil
+- daal = lentils
+- namak = salt
 
-Keywords:
-- Sale: beche, bechi, becha, sold, sale, bechaa
-- Expense: kharcha, kharch, spent, expense, kharche
-- Payment: payment, paid, mila, received
-- Products: chawal=rice, cheeni=sugar, atta=wheat flour, tel=oil
-
-Return ONLY valid JSON, no explanation."""
+Return ONLY valid JSON with no extra text or explanation."""
     
     try:
         # Use Sarvam AI's chat completion
@@ -191,7 +216,7 @@ Return ONLY valid JSON, no explanation."""
                     {"role": "system", "content": system_message},
                     {"role": "user", "content": command}
                 ],
-                model="sarvam-2b",  # Using Sarvam's 2B model
+                model="sarvam-105b",  # Using Sarvam's 105B model for better understanding
                 temperature=0,
                 max_tokens=200
             )
@@ -200,6 +225,16 @@ Return ONLY valid JSON, no explanation."""
         response_text = await loop.run_in_executor(None, get_sarvam_response)
         
         import json
+        # Clean response text - remove markdown code blocks if present
+        response_text = response_text.strip()
+        if response_text.startswith("```json"):
+            response_text = response_text[7:]
+        if response_text.startswith("```"):
+            response_text = response_text[3:]
+        if response_text.endswith("```"):
+            response_text = response_text[:-3]
+        response_text = response_text.strip()
+        
         parsed_data = json.loads(response_text)
         return parsed_data
     except Exception as e:
@@ -308,6 +343,43 @@ async def process_voice(
                 "success": True
             }
         
+        elif parsed.get('type') == 'purchase':
+            # Add to inventory when purchasing items
+            product = parsed.get('product')
+            quantity = parsed.get('quantity', 0)
+            purchase_price = parsed.get('price_per_unit', 0)
+            
+            if product:
+                result = await db.execute(
+                    select(InventoryModel).where(
+                        and_(InventoryModel.user_id == user_id, InventoryModel.product == product)
+                    )
+                )
+                existing = result.scalar_one_or_none()
+                
+                if existing:
+                    existing.quantity += quantity
+                    existing.purchase_price = purchase_price
+                    existing.updated_at = datetime.now()
+                else:
+                    inventory = InventoryModel(
+                        id=str(uuid.uuid4()),
+                        user_id=user_id,
+                        product=product,
+                        quantity=quantity,
+                        purchase_price=purchase_price,
+                        updated_at=datetime.now()
+                    )
+                    db.add(inventory)
+                
+                await db.commit()
+                
+                return {
+                    "text": transcribed_text,
+                    "message": f"Purchase recorded. Added {quantity} {product} to inventory. Total ₹{parsed.get('total'):.0f}.",
+                    "success": True
+                }
+        
         elif parsed.get('type') == 'expense':
             transaction = TransactionModel(
                 id=str(uuid.uuid4()),
@@ -409,6 +481,41 @@ async def process_command(input: CommandInput, auth: dict = Depends(verify_token
             message=f"Sale recorded. Total ₹{transaction.total:.0f}.{profit_msg}",
             transaction=Transaction.model_validate(transaction)
         )
+    
+    elif parsed.get('type') == 'purchase':
+        # Add to inventory when purchasing items
+        product = parsed.get('product')
+        quantity = parsed.get('quantity', 0)
+        purchase_price = parsed.get('price_per_unit', 0)
+        
+        if product:
+            result = await db.execute(
+                select(InventoryModel).where(
+                    and_(InventoryModel.user_id == user_id, InventoryModel.product == product)
+                )
+            )
+            existing = result.scalar_one_or_none()
+            
+            if existing:
+                existing.quantity += quantity
+                existing.purchase_price = purchase_price
+                existing.updated_at = datetime.now()
+            else:
+                inventory = InventoryModel(
+                    id=str(uuid.uuid4()),
+                    user_id=user_id,
+                    product=product,
+                    quantity=quantity,
+                    purchase_price=purchase_price,
+                    updated_at=datetime.now()
+                )
+                db.add(inventory)
+            
+            await db.commit()
+            
+            return CommandResponse(
+                message=f"Purchase recorded. Added {quantity} {product} to inventory. Total ₹{parsed.get('total'):.0f}."
+            )
     
     elif parsed.get('type') == 'expense':
         transaction = TransactionModel(
