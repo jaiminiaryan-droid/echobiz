@@ -98,7 +98,7 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-@api_router.post("/auth/register", response_model=TokenResponse)
+@api_router.post("/auth/register", response_model=TokenResponse, status_code=201)
 async def register(user_input: UserRegister):
     existing = await db.users.find_one({"username": user_input.username}, {"_id": 0})
     if existing:

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { useNavigate } from 'react-router-dom';
 import { Mic, TrendingUp, Package, History, LogOut, Send } from 'lucide-react';
@@ -12,6 +12,61 @@ export default function Dashboard({ token, setToken }) {
   const [loading, setLoading] = useState(false);
   const [listening, setListening] = useState(false);
   const navigate = useNavigate();
+  const recognitionRef = useRef(null);
+
+  useEffect(() => {
+    if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      recognitionRef.current = new SpeechRecognition();
+      recognitionRef.current.continuous = false;
+      recognitionRef.current.interimResults = false;
+      recognitionRef.current.lang = 'en-IN';
+
+      recognitionRef.current.onresult = (event) => {
+        const transcript = event.results[0][0].transcript;
+        setCommand(transcript);
+        setListening(false);
+        toast.success('Voice captured!');
+      };
+
+      recognitionRef.current.onerror = (event) => {
+        console.error('Speech recognition error:', event.error);
+        setListening(false);
+        if (event.error === 'no-speech') {
+          toast.error('No speech detected. Please try again.');
+        } else if (event.error === 'not-allowed') {
+          toast.error('Microphone access denied. Please enable it in browser settings.');
+        } else {
+          toast.error('Voice recognition error. Please try again.');
+        }
+      };
+
+      recognitionRef.current.onend = () => {
+        setListening(false);
+      };
+    }
+  }, []);
+
+  const toggleVoiceInput = () => {
+    if (!recognitionRef.current) {
+      toast.error('Voice recognition not supported in this browser. Please use Chrome or Edge.');
+      return;
+    }
+
+    if (listening) {
+      recognitionRef.current.stop();
+      setListening(false);
+    } else {
+      try {
+        recognitionRef.current.start();
+        setListening(true);
+        toast.info('Listening... Speak now!');
+      } catch (error) {
+        console.error('Error starting recognition:', error);
+        toast.error('Could not start voice input');
+      }
+    }
+  };
 
   const handleCommand = async () => {
     if (!command.trim()) return;
@@ -84,10 +139,7 @@ export default function Dashboard({ token, setToken }) {
           <div className="flex gap-3 mt-4">
             <button
               data-testid="mic-button"
-              onClick={() => {
-                setListening(!listening);
-                toast.info('Voice input coming soon!');
-              }}
+              onClick={toggleVoiceInput}
               className={`flex-1 py-4 rounded-full flex items-center justify-center gap-2 font-bold text-lg transition-all active:scale-95 ${
                 listening
                   ? 'bg-red-500 text-white animate-pulse-slow'
