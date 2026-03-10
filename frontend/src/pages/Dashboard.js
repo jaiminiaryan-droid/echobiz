@@ -11,9 +11,12 @@ export default function Dashboard({ token, setToken }) {
   const [command, setCommand] = useState('');
   const [loading, setLoading] = useState(false);
   const [listening, setListening] = useState(false);
+  const [recording, setRecording] = useState(false);
   const [summary, setSummary] = useState({ sales: 0, expenses: 0, profit: 0 });
   const navigate = useNavigate();
   const recognitionRef = useRef(null);
+  const mediaRecorderRef = useRef(null);
+  const audioChunksRef = useRef([]);
 
   useEffect(() => {
     fetchTodaySummary();
@@ -63,24 +66,94 @@ export default function Dashboard({ token, setToken }) {
     }
   }, []);
 
-  const toggleVoiceInput = () => {
-    if (!recognitionRef.current) {
-      toast.error('Voice recognition not supported in this browser. Please use Chrome or Edge.');
+  const toggleVoiceInput = async () => {
+    if (recording) {
+      // Stop recording
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+        mediaRecorderRef.current.stop();
+      }
       return;
     }
 
-    if (listening) {
-      recognitionRef.current.stop();
+    try {
+      // Request microphone permission
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      
+      // Create MediaRecorder
+      const mediaRecorder = new MediaRecorder(stream, {
+        mimeType: 'audio/webm;codecs=opus'
+      });
+      mediaRecorderRef.current = mediaRecorder;
+      audioChunksRef.current = [];
+
+      // Collect audio data
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+
+      // When recording stops
+      mediaRecorder.onstop = async () => {
+        setRecording(false);
+        setLoading(true);
+
+        // Create audio blob
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        
+        // Send to backend
+        const formData = new FormData();
+        formData.append('audio', audioBlob, 'recording.webm');
+
+        try {
+          const response = await axios.post(`${API}/voice`, formData, {
+            headers: {
+              'Authorization': `Bearer ${token}`,
+              'Content-Type': 'multipart/form-data'
+            }
+          });
+
+          // Set transcribed text and auto-submit
+          setCommand(response.data.text);
+          toast.success(response.data.message || 'Voice processed!');
+          
+          // Auto-process the command
+          if (response.data.text) {
+            setTimeout(() => {
+              handleCommand();
+            }, 500);
+          }
+        } catch (error) {
+          toast.error(error.response?.data?.detail || 'Voice processing failed');
+        } finally {
+          setLoading(false);
+        }
+
+        // Stop all tracks
+        stream.getTracks().forEach(track => track.stop());
+      };
+
+      // Start recording
+      mediaRecorder.start();
+      setRecording(true);
       setListening(false);
-    } else {
-      try {
-        recognitionRef.current.start();
-        setListening(true);
-        toast.info('Listening... Speak now!');
-      } catch (error) {
-        console.error('Error starting recognition:', error);
-        toast.error('Could not start voice input');
+      toast.info('🎤 Recording... Speak now!');
+
+      // Auto-stop after 10 seconds
+      setTimeout(() => {
+        if (mediaRecorder.state === 'recording') {
+          mediaRecorder.stop();
+        }
+      }, 10000);
+
+    } catch (error) {
+      console.error('Microphone error:', error);
+      if (error.name === 'NotAllowedError') {
+        toast.error('Microphone permission denied. Please allow access in browser settings.');
+      } else {
+        toast.error('Could not access microphone');
       }
+      setRecording(false);
     }
   };
 
@@ -157,14 +230,15 @@ export default function Dashboard({ token, setToken }) {
             <button
               data-testid="mic-button"
               onClick={toggleVoiceInput}
+              disabled={loading}
               className={`flex-1 py-4 rounded-full flex items-center justify-center gap-2 font-bold text-lg transition-all active:scale-95 ${
-                listening
+                recording
                   ? 'bg-red-500 text-white animate-pulse-slow'
                   : 'bg-orange-600 text-white hover:bg-orange-700'
-              }`}
+              } ${loading ? 'opacity-50 cursor-not-allowed' : ''}`}
             >
               <Mic className="h-6 w-6" />
-              {listening ? 'Listening...' : 'Speak'}
+              {recording ? 'Recording...' : loading ? 'Processing...' : 'Speak'}
             </button>
             <button
               data-testid="send-button"

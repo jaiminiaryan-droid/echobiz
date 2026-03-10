@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, UploadFile, File
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -12,6 +12,7 @@ from datetime import datetime, timezone, timedelta
 import bcrypt
 import jwt
 from emergentintegrations.llm.chat import LlmChat, UserMessage
+from emergentintegrations.llm.openai import OpenAISpeechToText
 from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -147,19 +148,33 @@ async def parse_command(command: str) -> dict:
     api_key = os.environ.get('EMERGENT_LLM_KEY')
     
     system_message = """You are a financial transaction parser for Indian shopkeepers.
-Extract structured data from natural language commands.
+Extract structured data from natural language commands in HINDI or ENGLISH.
 
-For SALE commands (sold, becha, sale):
-{"type": "sale", "product": "<product_name>", "quantity": <number>, "price_per_unit": <price>, "total": <quantity * price>}
+HINDI SALE Examples:
+Input: "10 chawal 60 rupaye mein beche" or "Maine 5 sugar 50 rupaye mein bechi"
+Output: {"type": "sale", "product": "rice", "quantity": 10, "price_per_unit": 60, "total": 600}
 
-For EXPENSE commands (bought, purchase, spent, kharcha):
-{"type": "expense", "category": "<category>", "total": <amount>}
+ENGLISH SALE Examples:
+Input: "Sold 5 rice for 50 each"
+Output: {"type": "sale", "product": "rice", "quantity": 5, "price_per_unit": 50, "total": 250}
 
-For PAYMENT commands (payment, paid, received, mila):
-{"type": "payment", "mode": "<cash/upi/card>", "customer": "<name if mentioned>", "total": <amount>}
+HINDI EXPENSE Examples:
+Input: "500 rupaye ka kharcha" or "Dukaan ke liye 2000 kharch kiye"
+Output: {"type": "expense", "category": "shop", "total": 2000}
 
-For QUERY commands (summary, profit, kitna, status):
-{"type": "query", "query_type": "<summary/inventory>"}
+ENGLISH EXPENSE Examples:
+Input: "Bought raw material for 3000"
+Output: {"type": "expense", "category": "raw material", "total": 3000}
+
+MIXED (Hinglish):
+Input: "5 rice 60 rupaye each mein becha"
+Output: {"type": "sale", "product": "rice", "quantity": 5, "price_per_unit": 60, "total": 300}
+
+Keywords:
+- Sale: beche, bechi, becha, sold, sale, bechaa
+- Expense: kharcha, kharch, spent, expense, kharche
+- Payment: payment, paid, mila, received
+- Products: chawal=rice, cheeni=sugar, atta=wheat flour, tel=oil
 
 Return ONLY valid JSON, no explanation."""
     
@@ -178,6 +193,135 @@ Return ONLY valid JSON, no explanation."""
         return parsed_data
     except:
         return {"type": "unknown", "error": "Could not parse command"}
+
+@api_router.post("/voice")
+async def process_voice(
+    audio: UploadFile = File(...),
+    auth: dict = Depends(verify_token),
+    db: AsyncSession = Depends(get_db)
+):
+    """Convert voice to text using OpenAI Whisper and process command"""
+    
+    try:
+        # Save uploaded audio temporarily
+        temp_dir = Path("/tmp")
+        temp_dir.mkdir(exist_ok=True)
+        audio_path = temp_dir / f"{uuid.uuid4()}.webm"
+        
+        with open(audio_path, "wb") as f:
+            content = await audio.read()
+            f.write(content)
+        
+        # Transcribe with Whisper
+        api_key = os.environ.get('EMERGENT_LLM_KEY')
+        stt = OpenAISpeechToText(api_key=api_key)
+        
+        with open(audio_path, "rb") as audio_file:
+            response = await stt.transcribe(
+                file=audio_file,
+                model="whisper-1",
+                language="hi",  # Hindi (auto-detects English too)
+                response_format="json"
+            )
+        
+        transcribed_text = response.text
+        
+        # Clean up temp file
+        audio_path.unlink(missing_ok=True)
+        
+        # Parse the transcribed command
+        parsed = await parse_command(transcribed_text)
+        
+        # Process as regular command (reuse existing logic)
+        user_id = auth['user_id']
+        
+        if parsed.get('type') == 'sale':
+            product = parsed.get('product')
+            quantity = parsed.get('quantity', 0)
+            selling_price = parsed.get('price_per_unit', 0)
+            
+            profit_loss = 0
+            if product:
+                result = await db.execute(
+                    select(InventoryModel).where(
+                        and_(InventoryModel.user_id == user_id, InventoryModel.product == product)
+                    )
+                )
+                inventory_item = result.scalar_one_or_none()
+                
+                if inventory_item:
+                    purchase_price = inventory_item.purchase_price
+                    profit_loss = (selling_price - purchase_price) * quantity
+                    
+                    inventory_item.quantity = max(0, inventory_item.quantity - quantity)
+                    inventory_item.updated_at = datetime.now()
+                else:
+                    inventory = InventoryModel(
+                        id=str(uuid.uuid4()),
+                        user_id=user_id,
+                        product=product,
+                        quantity=0,
+                        purchase_price=0,
+                        updated_at=datetime.now()
+                    )
+                    db.add(inventory)
+            
+            transaction = TransactionModel(
+                id=str(uuid.uuid4()),
+                user_id=user_id,
+                type="sale",
+                date=datetime.now().strftime('%Y-%m-%d'),
+                product=product,
+                quantity=quantity,
+                price_per_unit=selling_price,
+                total=parsed.get('total'),
+                profit_loss=profit_loss,
+                created_at=datetime.now()
+            )
+            db.add(transaction)
+            await db.commit()
+            
+            profit_msg = ""
+            if profit_loss > 0:
+                profit_msg = f" Profit: ₹{profit_loss:.0f}"
+            elif profit_loss < 0:
+                profit_msg = f" Loss: ₹{abs(profit_loss):.0f}"
+            
+            return {
+                "text": transcribed_text,
+                "message": f"Sale recorded. Total ₹{transaction.total:.0f}.{profit_msg}",
+                "success": True
+            }
+        
+        elif parsed.get('type') == 'expense':
+            transaction = TransactionModel(
+                id=str(uuid.uuid4()),
+                user_id=user_id,
+                type="expense",
+                date=datetime.now().strftime('%Y-%m-%d'),
+                category=parsed.get('category', 'General'),
+                total=parsed.get('total'),
+                created_at=datetime.now()
+            )
+            db.add(transaction)
+            await db.commit()
+            
+            return {
+                "text": transcribed_text,
+                "message": f"Expense recorded. ₹{transaction.total:.0f}.",
+                "success": True
+            }
+        
+        else:
+            return {
+                "text": transcribed_text,
+                "message": "Command transcribed but not understood. Please try again.",
+                "success": False
+            }
+    
+    except Exception as e:
+        logger.error(f"Voice processing error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Voice processing failed: {str(e)}")
 
 @api_router.post("/command", response_model=CommandResponse)
 async def process_command(input: CommandInput, auth: dict = Depends(verify_token), db: AsyncSession = Depends(get_db)):
