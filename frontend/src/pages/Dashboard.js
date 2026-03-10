@@ -11,8 +11,24 @@ export default function Dashboard({ token, setToken }) {
   const [command, setCommand] = useState('');
   const [loading, setLoading] = useState(false);
   const [listening, setListening] = useState(false);
+  const [summary, setSummary] = useState({ sales: 0, expenses: 0, profit: 0 });
   const navigate = useNavigate();
   const recognitionRef = useRef(null);
+
+  useEffect(() => {
+    fetchTodaySummary();
+  }, []);
+
+  const fetchTodaySummary = async () => {
+    try {
+      const response = await axios.get(`${API}/summary`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      setSummary(response.data);
+    } catch (error) {
+      console.error('Failed to load summary:', error);
+    }
+  };
 
   useEffect(() => {
     if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
@@ -80,6 +96,7 @@ export default function Dashboard({ token, setToken }) {
       );
       toast.success(response.data.message);
       setCommand('');
+      fetchTodaySummary();
     } catch (error) {
       toast.error(error.response?.data?.detail || 'Something went wrong');
     } finally {
@@ -93,9 +110,9 @@ export default function Dashboard({ token, setToken }) {
   };
 
   const quickCommands = [
-    { text: 'Sold 5 tables for 1000 each', icon: '🛒' },
-    { text: 'Bought raw material for 3000', icon: '💵' },
-    { text: 'Customer paid 5000 in cash', icon: '💳' },
+    { text: 'Sold 5 rice for 60 each', icon: '🌾' },
+    { text: 'Sold 10 sugar for 50 each', icon: '🍬' },
+    { text: 'Bought shop supplies for 500', icon: '💰' },
   ];
 
   return (
@@ -157,6 +174,37 @@ export default function Dashboard({ token, setToken }) {
             >
               <Send className="h-6 w-6" />
             </button>
+          </div>
+        </div>
+
+        <div className="bg-stone-900 text-white p-6 rounded-2xl shadow-warm-lg mb-6 relative overflow-hidden">
+          <div className="absolute top-0 right-0 w-32 h-32 bg-orange-600 rounded-full blur-3xl opacity-20"></div>
+          <div className="relative z-10">
+            <p className="text-xs font-bold uppercase tracking-wider opacity-80 mb-4">
+              Today's Business
+            </p>
+            <div className="grid grid-cols-3 gap-4">
+              <div>
+                <p className="text-xs opacity-70 mb-1">Sales</p>
+                <p data-testid="dashboard-sales" className="text-xl font-extrabold text-emerald-400">
+                  ₹{summary.sales.toFixed(0)}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs opacity-70 mb-1">Expenses</p>
+                <p data-testid="dashboard-expenses" className="text-xl font-extrabold text-rose-400">
+                  ₹{summary.expenses.toFixed(0)}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs opacity-70 mb-1">Profit</p>
+                <p data-testid="dashboard-profit" className={`text-xl font-extrabold ${
+                  summary.profit >= 0 ? 'text-emerald-300' : 'text-rose-300'
+                }`}>
+                  {summary.profit >= 0 ? '+' : ''}₹{summary.profit.toFixed(0)}
+                </p>
+              </div>
+            </div>
           </div>
         </div>
 
