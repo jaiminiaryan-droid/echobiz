@@ -11,7 +11,6 @@ import uuid
 from datetime import datetime, timezone, timedelta
 import bcrypt
 import jwt
-from openai import AsyncOpenAI
 from sarvamai import SarvamAI
 from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,10 +21,7 @@ from models import User as UserModel, Transaction as TransactionModel, Inventory
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# Initialize OpenAI client for GPT-4o parsing
-openai_client = AsyncOpenAI(api_key=os.environ.get('OPENAI_API_KEY'))
-
-# Initialize Sarvam AI client for Indian language speech-to-text
+# Initialize Sarvam AI client - 100% Indian AI solution!
 sarvam_client = SarvamAI(api_subscription_key=os.environ.get('SARVAM_API_KEY'))
 
 app = FastAPI()
@@ -151,7 +147,7 @@ async def login(user_input: UserLogin, db: AsyncSession = Depends(get_db)):
     return TokenResponse(token=token, username=user.username)
 
 async def parse_command(command: str) -> dict:
-    """Parse natural language command using GPT-4o"""
+    """Parse natural language command using Sarvam AI LLM (Made in India!)"""
     
     system_message = """You are a financial transaction parser for Indian shopkeepers.
 Extract structured data from natural language commands in HINDI or ENGLISH.
@@ -185,21 +181,29 @@ Keywords:
 Return ONLY valid JSON, no explanation."""
     
     try:
-        response = await openai_client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": system_message},
-                {"role": "user", "content": command}
-            ],
-            temperature=0,
-            max_tokens=200
-        )
+        # Use Sarvam AI's chat completion
+        import asyncio
+        loop = asyncio.get_event_loop()
+        
+        def get_sarvam_response():
+            response = sarvam_client.chat.completions(
+                messages=[
+                    {"role": "system", "content": system_message},
+                    {"role": "user", "content": command}
+                ],
+                model="sarvam-2b",  # Using Sarvam's 2B model
+                temperature=0,
+                max_tokens=200
+            )
+            return response.choices[0].message.content
+        
+        response_text = await loop.run_in_executor(None, get_sarvam_response)
         
         import json
-        parsed_data = json.loads(response.choices[0].message.content)
+        parsed_data = json.loads(response_text)
         return parsed_data
     except Exception as e:
-        logger.error(f"Parse command error: {str(e)}")
+        logger.error(f"Sarvam AI parse error: {str(e)}")
         return {"type": "unknown", "error": "Could not parse command"}
 
 @api_router.post("/voice")
