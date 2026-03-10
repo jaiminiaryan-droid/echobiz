@@ -24,6 +24,58 @@ load_dotenv(ROOT_DIR / '.env')
 # Initialize Sarvam AI client - 100% Indian AI solution!
 sarvam_client = SarvamAI(api_subscription_key=os.environ.get('SARVAM_API_KEY'))
 
+# Product name normalization mapping (Hindi/English/Hinglish)
+PRODUCT_MAPPINGS = {
+    # Rice variations
+    'chawal': 'rice',
+    'चावल': 'rice',
+    'rice': 'rice',
+    
+    # Wheat flour variations
+    'atta': 'wheat flour',
+    'आटा': 'wheat flour',
+    'wheat flour': 'wheat flour',
+    'wheat': 'wheat flour',
+    'gehun': 'wheat flour',
+    'गेहूं': 'wheat flour',
+    
+    # Sugar variations
+    'cheeni': 'sugar',
+    'chini': 'sugar',
+    'चीनी': 'sugar',
+    'sugar': 'sugar',
+    
+    # Oil variations
+    'tel': 'oil',
+    'तेल': 'oil',
+    'oil': 'oil',
+    
+    # Lentils variations
+    'daal': 'lentils',
+    'dal': 'lentils',
+    'दाल': 'lentils',
+    'lentils': 'lentils',
+    
+    # Salt variations
+    'namak': 'salt',
+    'नमक': 'salt',
+    'salt': 'salt',
+    
+    # Milk variations
+    'doodh': 'milk',
+    'dudh': 'milk',
+    'दूध': 'milk',
+    'milk': 'milk',
+}
+
+def normalize_product_name(product: str) -> str:
+    """Normalize product names to canonical English names"""
+    if not product:
+        return product
+    
+    product_lower = product.lower().strip()
+    return PRODUCT_MAPPINGS.get(product_lower, product_lower)
+
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
 security = HTTPBearer()
@@ -147,58 +199,22 @@ async def login(user_input: UserLogin, db: AsyncSession = Depends(get_db)):
     return TokenResponse(token=token, username=user.username)
 
 async def parse_command(command: str) -> dict:
-    """Parse natural language command using Sarvam AI LLM (Made in India!)"""
+    """Parse natural language command using Sarvam AI LLM (Made in India!) - OPTIMIZED"""
     
-    system_message = """You are a financial transaction parser for Indian shopkeepers.
-Extract structured data from natural language commands in HINDI or ENGLISH.
+    # Shorter, more direct prompt for faster processing
+    system_message = """Extract transaction JSON from Hindi/English commands.
 
-IMPORTANT: Detect buying vs selling carefully:
-- BUYING/PURCHASE: kharido, kharide, kharida, liye, liya, bought, purchase, mangaya, got
-- SELLING: beche, bechi, becha, bechaa, sold, sale, diye (when giving to customer)
+PURCHASE (buying stock): kharido, kharida, liye, bought, purchase, got
+SALE (selling to customer): beche, becha, sold, sale
 
-HINDI SALE (बेचना - Selling) Examples:
-Input: "10 chawal 60 rupaye mein beche"
-Output: {"type": "sale", "product": "chawal", "quantity": 10, "price_per_unit": 60, "total": 600}
+Examples:
+"10 chawal 50 ke rate pe kharida" → {"type":"purchase","product":"chawal","quantity":10,"price_per_unit":50,"total":500}
+"5 rice beche 80 each" → {"type":"sale","product":"rice","quantity":5,"price_per_unit":80,"total":400}
+"500 ka kharcha" → {"type":"expense","category":"general","total":500}
 
-Input: "5 kilo chawal 60 ke rate pe bech diye"
-Output: {"type": "sale", "product": "chawal", "quantity": 5, "price_per_unit": 60, "total": 300}
-
-HINDI PURCHASE (खरीदना - Buying/Inventory) Examples:
-Input: "10 kilo chawal 50 ke rate pe kharida"
-Output: {"type": "purchase", "product": "chawal", "quantity": 10, "price_per_unit": 50, "total": 500}
-
-Input: "ye chiz 100 ki kharido"
-Output: {"type": "purchase", "product": "item", "quantity": 1, "price_per_unit": 100, "total": 100}
-
-Input: "5 sugar 40 rupaye mein liye"
-Output: {"type": "purchase", "product": "sugar", "quantity": 5, "price_per_unit": 40, "total": 200}
-
-ENGLISH SALE Examples:
-Input: "Sold 5 rice for 50 each"
-Output: {"type": "sale", "product": "rice", "quantity": 5, "price_per_unit": 50, "total": 250}
-
-ENGLISH PURCHASE Examples:
-Input: "Bought 10 rice at 40 each"
-Output: {"type": "purchase", "product": "rice", "quantity": 10, "price_per_unit": 40, "total": 400}
-
-Input: "Got 10 rice at 50 each"
-Output: {"type": "purchase", "product": "rice", "quantity": 10, "price_per_unit": 50, "total": 500}
-
-HINDI EXPENSE Examples:
-Input: "500 rupaye ka kharcha"
-Output: {"type": "expense", "category": "general", "total": 500}
-
-ENGLISH EXPENSE Examples:
-Input: "Bought shop supplies for 3000"
-Output: {"type": "expense", "category": "shop supplies", "total": 3000}
-
-Common Products Translation:
-- chawal = rice, cheeni = sugar, atta = wheat flour, tel = oil, daal = lentils, namak = salt
-
-Return ONLY valid JSON with no extra text."""
+Return ONLY JSON, no text."""
     
     try:
-        # Use Sarvam AI's chat completion
         import asyncio
         loop = asyncio.get_event_loop()
         
@@ -208,67 +224,48 @@ Return ONLY valid JSON with no extra text."""
                     {"role": "system", "content": system_message},
                     {"role": "user", "content": command}
                 ],
-                model="sarvam-m",  # Using Sarvam's base model (no reasoning mode)
+                model="sarvam-m",
                 temperature=0,
-                max_tokens=150
+                max_tokens=80  # Reduced from 150 for faster response
             )
             
-            # Access response content
             if hasattr(response, 'choices') and len(response.choices) > 0:
                 choice = response.choices[0]
                 if hasattr(choice, 'message'):
                     msg = choice.message
-                    # Try content first
                     if hasattr(msg, 'content') and msg.content:
                         return msg.content
-                    # If no content, check if there's a response dict
-                    if hasattr(msg, '__dict__'):
-                        logger.info(f"Message attributes: {msg.__dict__}")
-            
-            # Log full response for debugging
-            logger.error(f"Could not extract content from Sarvam response: {response}")
             return None
         
         response_text = await loop.run_in_executor(None, get_sarvam_response)
         
         if not response_text:
-            logger.error("Sarvam AI returned empty response")
-            return {"type": "unknown", "error": "Empty response from AI"}
-        
-        logger.info(f"Sarvam AI response: {response_text}")
+            return {"type": "unknown", "error": "Empty response"}
         
         import json
         import re
-        # Clean response text - remove markdown code blocks and XML tags if present
-        response_text = response_text.strip()
         
-        # Remove <think> tags if present
+        # Quick cleanup
+        response_text = response_text.strip()
         if '<think>' in response_text:
             response_text = re.sub(r'<think>\s*', '', response_text)
-            response_text = re.sub(r'\s*</think>', '', response_text)
         
-        # Remove markdown code blocks
-        if response_text.startswith("```json"):
-            response_text = response_text[7:]
-        if response_text.startswith("```"):
-            response_text = response_text[3:]
-        if response_text.endswith("```"):
-            response_text = response_text[:-3]
-        response_text = response_text.strip()
-        
-        # Try to extract JSON if there's extra text
+        # Extract JSON quickly
         json_match = re.search(r'\{[^{}]*"type"[^{}]*\}', response_text)
         if json_match:
             response_text = json_match.group(0)
         
         parsed_data = json.loads(response_text)
-        logger.info(f"Parsed command successfully: {parsed_data}")
+        
+        # Normalize product name
+        if 'product' in parsed_data and parsed_data['product']:
+            parsed_data['product'] = normalize_product_name(parsed_data['product'])
+        
+        logger.info(f"Parsed: {parsed_data}")
         return parsed_data
     except Exception as e:
-        logger.error(f"Sarvam AI parse error: {str(e)}")
-        import traceback
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        return {"type": "unknown", "error": "Could not parse command"}
+        logger.error(f"Parse error: {str(e)}")
+        return {"type": "unknown", "error": str(e)}
 
 @api_router.post("/voice")
 async def process_voice(
@@ -318,6 +315,9 @@ async def process_voice(
             product = parsed.get('product')
             quantity = parsed.get('quantity', 0)
             selling_price = parsed.get('price_per_unit', 0)
+            
+            # Normalize product name
+            product = normalize_product_name(product)
             
             profit_loss = 0
             if product:
@@ -378,6 +378,9 @@ async def process_voice(
             quantity = parsed.get('quantity', 0)
             purchase_price = parsed.get('price_per_unit', 0)
             
+            # Normalize product name
+            product = normalize_product_name(product)
+            
             if product:
                 result = await db.execute(
                     select(InventoryModel).where(
@@ -401,6 +404,20 @@ async def process_voice(
                     )
                     db.add(inventory)
                 
+                # Create transaction record for purchase
+                transaction = TransactionModel(
+                    id=str(uuid.uuid4()),
+                    user_id=user_id,
+                    type="expense",  # Purchases are expenses
+                    date=datetime.now().strftime('%Y-%m-%d'),
+                    category=f"Inventory - {product}",
+                    product=product,
+                    quantity=quantity,
+                    price_per_unit=purchase_price,
+                    total=parsed.get('total'),
+                    created_at=datetime.now()
+                )
+                db.add(transaction)
                 await db.commit()
                 
                 return {
@@ -457,6 +474,9 @@ async def process_command(input: CommandInput, auth: dict = Depends(verify_token
         product = parsed.get('product')
         quantity = parsed.get('quantity', 0)
         selling_price = parsed.get('price_per_unit', 0)
+        
+        # Normalize product name
+        product = normalize_product_name(product)
         
         profit_loss = 0
         if product:
@@ -517,6 +537,9 @@ async def process_command(input: CommandInput, auth: dict = Depends(verify_token
         quantity = parsed.get('quantity', 0)
         purchase_price = parsed.get('price_per_unit', 0)
         
+        # Normalize product name
+        product = normalize_product_name(product)
+        
         if product:
             result = await db.execute(
                 select(InventoryModel).where(
@@ -540,10 +563,26 @@ async def process_command(input: CommandInput, auth: dict = Depends(verify_token
                 )
                 db.add(inventory)
             
+            # Create transaction record for purchase
+            transaction = TransactionModel(
+                id=str(uuid.uuid4()),
+                user_id=user_id,
+                type="expense",  # Purchases are expenses
+                date=datetime.now().strftime('%Y-%m-%d'),
+                category=f"Inventory - {product}",
+                product=product,
+                quantity=quantity,
+                price_per_unit=purchase_price,
+                total=parsed.get('total'),
+                created_at=datetime.now()
+            )
+            db.add(transaction)
             await db.commit()
+            await db.refresh(transaction)
             
             return CommandResponse(
-                message=f"Purchase recorded. Added {quantity} {product} to inventory. Total ₹{parsed.get('total'):.0f}."
+                message=f"Purchase recorded. Added {quantity} {product} to inventory. Total ₹{parsed.get('total'):.0f}.",
+                transaction=Transaction.model_validate(transaction)
             )
     
     elif parsed.get('type') == 'expense':
