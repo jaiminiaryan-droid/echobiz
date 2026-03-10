@@ -129,6 +129,13 @@ export default function History({ token }) {
                   }`}>
                     {txn.type === 'sale' || txn.type === 'payment' ? '+' : '-'}₹{txn.total.toFixed(0)}
                   </p>
+                  {txn.profit_loss !== undefined && txn.profit_loss !== null && (
+                    <p className={`text-xs font-bold ${
+                      txn.profit_loss >= 0 ? 'text-emerald-600' : 'text-rose-600'
+                    }`}>
+                      {txn.profit_loss >= 0 ? 'Profit' : 'Loss'}: ₹{Math.abs(txn.profit_loss).toFixed(0)}
+                    </p>
+                  )}
                   <p className="text-xs text-stone-500">{txn.date}</p>
                 </div>
               </div>

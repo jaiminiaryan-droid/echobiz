@@ -59,6 +59,7 @@ class Transaction(BaseModel):
     category: Optional[str] = None
     mode: Optional[str] = None
     customer: Optional[str] = None
+    profit_loss: Optional[float] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 class Inventory(BaseModel):
@@ -66,7 +67,13 @@ class Inventory(BaseModel):
     user_id: str
     product: str
     quantity: int
+    purchase_price: float
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+class InventoryAdd(BaseModel):
+    product: str
+    quantity: int
+    purchase_price: float
 
 class CommandInput(BaseModel):
     command: str
@@ -178,24 +185,17 @@ async def process_command(input: CommandInput, auth: dict = Depends(verify_token
             return CommandResponse(message="Please check inventory section")
     
     if parsed.get('type') == 'sale':
-        transaction = Transaction(
-            user_id=user_id,
-            type="sale",
-            date=datetime.now(timezone.utc).strftime('%Y-%m-%d'),
-            product=parsed.get('product'),
-            quantity=parsed.get('quantity'),
-            price_per_unit=parsed.get('price_per_unit'),
-            total=parsed.get('total')
-        )
-        trans_doc = transaction.model_dump()
-        trans_doc['created_at'] = trans_doc['created_at'].isoformat()
-        await db.transactions.insert_one(trans_doc)
-        
         product = parsed.get('product')
         quantity = parsed.get('quantity', 0)
+        selling_price = parsed.get('price_per_unit', 0)
+        
+        profit_loss = 0
         if product:
             inventory_doc = await db.inventory.find_one({"user_id": user_id, "product": product}, {"_id": 0})
             if inventory_doc:
+                purchase_price = inventory_doc.get('purchase_price', 0)
+                profit_loss = (selling_price - purchase_price) * quantity
+                
                 new_quantity = max(0, inventory_doc['quantity'] - quantity)
                 await db.inventory.update_one(
                     {"user_id": user_id, "product": product},
@@ -206,11 +206,32 @@ async def process_command(input: CommandInput, auth: dict = Depends(verify_token
                     "user_id": user_id,
                     "product": product,
                     "quantity": 0,
+                    "purchase_price": 0,
                     "updated_at": datetime.now(timezone.utc).isoformat()
                 })
         
+        transaction = Transaction(
+            user_id=user_id,
+            type="sale",
+            date=datetime.now(timezone.utc).strftime('%Y-%m-%d'),
+            product=product,
+            quantity=quantity,
+            price_per_unit=selling_price,
+            total=parsed.get('total'),
+            profit_loss=profit_loss
+        )
+        trans_doc = transaction.model_dump()
+        trans_doc['created_at'] = trans_doc['created_at'].isoformat()
+        await db.transactions.insert_one(trans_doc)
+        
+        profit_msg = ""
+        if profit_loss > 0:
+            profit_msg = f" Profit: ₹{profit_loss:.0f}"
+        elif profit_loss < 0:
+            profit_msg = f" Loss: ₹{abs(profit_loss):.0f}"
+        
         return CommandResponse(
-            message=f"Sale recorded. Total ₹{transaction.total:.0f}.",
+            message=f"Sale recorded. Total ₹{transaction.total:.0f}.{profit_msg}",
             transaction=transaction
         )
     
@@ -276,8 +297,68 @@ async def get_inventory(auth: dict = Depends(verify_token)):
     for item in inventory_items:
         if isinstance(item.get('updated_at'), str):
             item['updated_at'] = datetime.fromisoformat(item['updated_at'])
+        if 'purchase_price' not in item:
+            item['purchase_price'] = 0
     
     return inventory_items
+
+@api_router.post("/inventory/add")
+async def add_inventory(inventory_input: InventoryAdd, auth: dict = Depends(verify_token)):
+    user_id = auth['user_id']
+    product = inventory_input.product.lower()
+    
+    existing = await db.inventory.find_one({"user_id": user_id, "product": product}, {"_id": 0})
+    
+    if existing:
+        new_quantity = existing['quantity'] + inventory_input.quantity
+        await db.inventory.update_one(
+            {"user_id": user_id, "product": product},
+            {"$set": {
+                "quantity": new_quantity,
+                "purchase_price": inventory_input.purchase_price,
+                "updated_at": datetime.now(timezone.utc).isoformat()
+            }}
+        )
+        return {"message": f"Updated {product}. New stock: {new_quantity} units", "quantity": new_quantity}
+    else:
+        inventory_doc = {
+            "user_id": user_id,
+            "product": product,
+            "quantity": inventory_input.quantity,
+            "purchase_price": inventory_input.purchase_price,
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }
+        await db.inventory.insert_one(inventory_doc)
+        return {"message": f"Added {product} to inventory", "quantity": inventory_input.quantity}
+
+@api_router.post("/inventory/seed")
+async def seed_inventory(auth: dict = Depends(verify_token)):
+    """Seed initial grocery inventory for new users"""
+    user_id = auth['user_id']
+    
+    initial_stock = [
+        {"product": "rice", "quantity": 50, "purchase_price": 40},
+        {"product": "wheat flour", "quantity": 30, "purchase_price": 35},
+        {"product": "sugar", "quantity": 25, "purchase_price": 45},
+        {"product": "cooking oil", "quantity": 20, "purchase_price": 180},
+        {"product": "tea", "quantity": 15, "purchase_price": 250},
+        {"product": "salt", "quantity": 40, "purchase_price": 20},
+        {"product": "milk", "quantity": 10, "purchase_price": 60},
+        {"product": "biscuits", "quantity": 50, "purchase_price": 10},
+    ]
+    
+    for item in initial_stock:
+        existing = await db.inventory.find_one({"user_id": user_id, "product": item["product"]})
+        if not existing:
+            await db.inventory.insert_one({
+                "user_id": user_id,
+                "product": item["product"],
+                "quantity": item["quantity"],
+                "purchase_price": item["purchase_price"],
+                "updated_at": datetime.now(timezone.utc).isoformat()
+            })
+    
+    return {"message": "Inventory seeded with basic groceries", "items_added": len(initial_stock)}
 
 @api_router.get("/transactions", response_model=List[Transaction])
 async def get_transactions(auth: dict = Depends(verify_token)):
