@@ -6,7 +6,7 @@ from datetime import datetime
 import time
 
 class EchoBizAPITester:
-    def __init__(self, base_url="https://voice-ledger-12.preview.emergentagent.com"):
+    def __init__(self, base_url="https://present-site.preview.emergentagent.com"):
         self.base_url = base_url
         self.api_url = f"{base_url}/api"
         self.token = None
