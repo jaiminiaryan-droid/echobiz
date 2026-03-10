@@ -14,7 +14,6 @@ import jwt
 from sarvamai import SarvamAI
 from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
-from emergentintegrations.llm.chat import LlmChat, UserMessage
 
 from database import get_db, engine, Base
 from models import User as UserModel, Transaction as TransactionModel, Inventory as InventoryModel
@@ -22,11 +21,8 @@ from models import User as UserModel, Transaction as TransactionModel, Inventory
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# Initialize Sarvam AI client for speech-to-text (100% Indian AI solution!)
+# Initialize Sarvam AI client - 100% Indian AI solution!
 sarvam_client = SarvamAI(api_subscription_key=os.environ.get('SARVAM_API_KEY'))
-
-# Get Emergent LLM Key for OpenAI command parsing
-EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY')
 
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
@@ -151,7 +147,7 @@ async def login(user_input: UserLogin, db: AsyncSession = Depends(get_db)):
     return TokenResponse(token=token, username=user.username)
 
 async def parse_command(command: str) -> dict:
-    """Parse natural language command using OpenAI via Emergent LLM Key"""
+    """Parse natural language command using Sarvam AI LLM (Made in India!)"""
     
     system_message = """You are a financial transaction parser for Indian shopkeepers.
 Extract structured data from natural language commands in HINDI or ENGLISH.
@@ -163,9 +159,6 @@ IMPORTANT: Detect buying vs selling carefully:
 HINDI SALE (बेचना - Selling) Examples:
 Input: "10 chawal 60 rupaye mein beche"
 Output: {"type": "sale", "product": "chawal", "quantity": 10, "price_per_unit": 60, "total": 600}
-
-Input: "Maine 5 sugar 50 rupaye mein bechi"
-Output: {"type": "sale", "product": "sugar", "quantity": 5, "price_per_unit": 50, "total": 250}
 
 Input: "5 kilo chawal 60 ke rate pe bech diye"
 Output: {"type": "sale", "product": "chawal", "quantity": 5, "price_per_unit": 60, "total": 300}
@@ -180,9 +173,6 @@ Output: {"type": "purchase", "product": "item", "quantity": 1, "price_per_unit":
 Input: "5 sugar 40 rupaye mein liye"
 Output: {"type": "purchase", "product": "sugar", "quantity": 5, "price_per_unit": 40, "total": 200}
 
-Input: "maine 10 kg chawal 50 ke rate pe kharide"
-Output: {"type": "purchase", "product": "chawal", "quantity": 10, "price_per_unit": 50, "total": 500}
-
 ENGLISH SALE Examples:
 Input: "Sold 5 rice for 50 each"
 Output: {"type": "sale", "product": "rice", "quantity": 5, "price_per_unit": 50, "total": 250}
@@ -195,39 +185,69 @@ Input: "Got 10 rice at 50 each"
 Output: {"type": "purchase", "product": "rice", "quantity": 10, "price_per_unit": 50, "total": 500}
 
 HINDI EXPENSE Examples:
-Input: "500 rupaye ka kharcha" or "Dukaan ke liye 2000 kharch kiye"
-Output: {"type": "expense", "category": "shop", "total": 2000}
+Input: "500 rupaye ka kharcha"
+Output: {"type": "expense", "category": "general", "total": 500}
 
 ENGLISH EXPENSE Examples:
 Input: "Bought shop supplies for 3000"
 Output: {"type": "expense", "category": "shop supplies", "total": 3000}
 
 Common Products Translation:
-- chawal = rice
-- cheeni = sugar
-- atta = wheat flour
-- tel = oil
-- daal = lentils
-- namak = salt
+- chawal = rice, cheeni = sugar, atta = wheat flour, tel = oil, daal = lentils, namak = salt
 
-Return ONLY valid JSON with no extra text or explanation."""
+Return ONLY valid JSON with no extra text."""
     
     try:
-        # Use OpenAI via emergentintegrations
-        chat = LlmChat(
-            api_key=EMERGENT_LLM_KEY,
-            session_id=f"parse_{uuid.uuid4()}",
-            system_message=system_message
-        ).with_model("openai", "gpt-4o")
+        # Use Sarvam AI's chat completion
+        import asyncio
+        loop = asyncio.get_event_loop()
         
-        user_message = UserMessage(text=command)
-        response_text = await chat.send_message(user_message)
+        def get_sarvam_response():
+            response = sarvam_client.chat.completions(
+                messages=[
+                    {"role": "system", "content": system_message},
+                    {"role": "user", "content": command}
+                ],
+                model="sarvam-m",  # Using Sarvam's base model (no reasoning mode)
+                temperature=0,
+                max_tokens=150
+            )
+            
+            # Access response content
+            if hasattr(response, 'choices') and len(response.choices) > 0:
+                choice = response.choices[0]
+                if hasattr(choice, 'message'):
+                    msg = choice.message
+                    # Try content first
+                    if hasattr(msg, 'content') and msg.content:
+                        return msg.content
+                    # If no content, check if there's a response dict
+                    if hasattr(msg, '__dict__'):
+                        logger.info(f"Message attributes: {msg.__dict__}")
+            
+            # Log full response for debugging
+            logger.error(f"Could not extract content from Sarvam response: {response}")
+            return None
         
-        logger.info(f"OpenAI response: {response_text}")
+        response_text = await loop.run_in_executor(None, get_sarvam_response)
+        
+        if not response_text:
+            logger.error("Sarvam AI returned empty response")
+            return {"type": "unknown", "error": "Empty response from AI"}
+        
+        logger.info(f"Sarvam AI response: {response_text}")
         
         import json
-        # Clean response text - remove markdown code blocks if present
+        import re
+        # Clean response text - remove markdown code blocks and XML tags if present
         response_text = response_text.strip()
+        
+        # Remove <think> tags if present
+        if '<think>' in response_text:
+            response_text = re.sub(r'<think>\s*', '', response_text)
+            response_text = re.sub(r'\s*</think>', '', response_text)
+        
+        # Remove markdown code blocks
         if response_text.startswith("```json"):
             response_text = response_text[7:]
         if response_text.startswith("```"):
@@ -236,11 +256,16 @@ Return ONLY valid JSON with no extra text or explanation."""
             response_text = response_text[:-3]
         response_text = response_text.strip()
         
+        # Try to extract JSON if there's extra text
+        json_match = re.search(r'\{[^{}]*"type"[^{}]*\}', response_text)
+        if json_match:
+            response_text = json_match.group(0)
+        
         parsed_data = json.loads(response_text)
         logger.info(f"Parsed command successfully: {parsed_data}")
         return parsed_data
     except Exception as e:
-        logger.error(f"Command parse error: {str(e)}")
+        logger.error(f"Sarvam AI parse error: {str(e)}")
         import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
         return {"type": "unknown", "error": "Could not parse command"}
